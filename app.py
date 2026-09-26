@@ -241,7 +241,7 @@ def status():
             })
 
     return {
-        "version": "0.9",
+        "version": "1.0",
         "public_preview": bool(os.environ.get("PUBLIC_PREVIEW")),
         "matches": total,
         "leagues": output,
@@ -711,6 +711,45 @@ def fixture_report(code, fixture_id):
     listing=get_scheduled_fixtures(code)
     fixture=next((f for f in listing["fixtures"] if str(f["id"])==str(fixture_id)),None)
     if fixture is None:raise ValueError("This fixture is not in the current scheduled-match list. Refresh and select an upcoming match.")
+    return build_match_report(code, fixture, listing["source"], manual=False)
+
+
+def manual_report(payload):
+    """Analyse only user-entered pairings; no fixture API is required."""
+    if not isinstance(payload, dict):
+        raise ValueError("Expected match pairing details.")
+    code=str(payload.get("league","")).strip()
+    home=str(payload.get("home","")).strip()
+    away=str(payload.get("away","")).strip()
+    if code not in LEAGUES:
+        raise ValueError("Select a competition with imported historical results.")
+    if not home or not away or len(home)>110 or len(away)>110:
+        raise ValueError("Select both teams from the available historical teams.")
+    if home==away:
+        raise ValueError("The home and away teams must be different.")
+    rows=fetch_matches(code)
+    if len(rows)<40:
+        raise ValueError("Insufficient historical results in the selected competition.")
+    # Only documented historical teams are eligible. Do not silently invent a new club.
+    home=historical_team(home,rows)
+    away=historical_team(away,rows)
+    if home==away:
+        raise ValueError("The home and away teams must be different.")
+    fixture={"id":"manual","date":datetime.now(timezone.utc).isoformat(),
+             "home":home,"away":away,"manual":True}
+    result=build_match_report(code,fixture,"User-entered bookmaker pairing",manual=True)
+    for side,name in (("home",home),("away",away)):
+        result["team_latest"][side]=max(
+            r["date"] for r in rows if name in (r["home"],r["away"])
+        )
+    result["warning"]+=(
+        " Last recorded match for "+home+": "+result["team_latest"]["home"]+
+        "; "+away+": "+result["team_latest"]["away"]+"."
+    )
+    return result
+
+
+def build_match_report(code,fixture,source,manual=False):
     rows=fetch_matches(code)
     if len(rows)<40:raise ValueError("Insufficient historical results for this league.")
     home=historical_team(fixture["home"],rows)
@@ -746,20 +785,23 @@ def fixture_report(code, fixture_id):
     goals={str(n):{"over":m["over_"+str(n).replace(".","_")],
                    "under":m["under_"+str(n).replace(".","_")]} for n in (0.5,1.5,2.5,3.5,4.5)}
     h2h=[r for r in previous if {r["home"],r["away"]}=={home,away}][-10:]
-    return {"fixture":fixture,"league":LEAGUES[code]["name"],"source":listing["source"],
+    return {"fixture":fixture,"league":LEAGUES[code]["name"],"source":source,
+        "team_latest":{},
         "model":{"name":"Smoothed independent Poisson","historical_matches":model["historical_matches"],
                  "latest":latest,"age_days":age,"home_goals":model["expected_home_goals"],
                  "away_goals":model["expected_away_goals"]},
         "full_time":{k:m[k] for k in ("home","draw","away")},
         "half_time":half_time_markets(previous,home,away),"goals":goals,
         "btts":{"yes":m["btts_yes"],"no":m["btts_no"]},
+        "double_chance":{k:m[k] for k in ("1x","x2","12")},
         "form":{side:{str(n):recent_form(previous,name,n) for n in (5,10,20)}
                 for side,name in (("home",home),("away",away))},
         "h2h":[{"date":r["date"],"home":r["home"],"away":r["away"],
                 "hg":r["hg"],"ag":r["ag"]} for r in h2h],
         "unavailable":["Corners","Throw-ins","Yellow and red cards","Shots and possession",
                        "Injuries and suspensions","Confirmed lineups","xG","Current bookmaker odds"],
-        "warning":("Latest available match record: "+latest+" ("+str(age)+" days old). "
+        "warning":(("Pairing manually entered by the user; fixture and kickoff are not verified. " if manual else "")
+                   +"Latest available league record: "+latest+" ("+str(age)+" days old). "
                    +str(current_count)+" additional current-season results included. "
                    +("Official results unavailable: "+current_error+". " if current_error else "")
                    +"Historical model estimates are not guaranteed or validated for betting.")}
@@ -924,6 +966,9 @@ class Handler(BaseHTTPRequestHandler):
                     import_data()
                 )
 
+            if route == "/api/manual-report":
+                return self.send_json(manual_report(payload))
+
             if route == "/api/predict":
                 return self.send_json(
                     predict(payload)
@@ -969,7 +1014,7 @@ def main():
     )
 
     print()
-    print("FOOTBALL PREDICTOR v0.3-data")
+    print("FOOTBALL PREDICTOR v1.0 manual pairings")
     print("Application:", url)
     print("Database:", DB)
     print("Import folder:", IMPORT)

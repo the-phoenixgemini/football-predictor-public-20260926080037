@@ -13,5 +13,7 @@ jobs:
           python-version: '3.13'
       - name: Validate source and historical data
         run: python verify_v09.py
+      - name: Verify user-entered match and implied fair odds
+        run: python verify_manual_v11.py
       - name: Verify fixture report with offline stub
         run: python verify_v08.py
