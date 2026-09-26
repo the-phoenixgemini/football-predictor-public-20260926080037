@@ -241,7 +241,7 @@ def status():
             })
 
     return {
-        "version": "0.8",
+        "version": "0.9",
         "public_preview": bool(os.environ.get("PUBLIC_PREVIEW")),
         "matches": total,
         "leagues": output,
@@ -657,12 +657,21 @@ ALIASES = {
     "intermilan":"inter","acmilan":"milan",
     "parissaintgermain":"psg","parissaintgermainfc":"psg",
     "olympiquemarseille":"marseille","olympiquelyon":"lyon",
+    "bayernmunchen":"bayernmunich","bayernmuenchen":"bayernmunich",
+    "borussiadortmund":"dortmund","vfb stuttgart":"stuttgart",
+    "sportclubfreiburg":"scfreiburg","freiburg":"scfreiburg",
+    "tsghoffenheim":"1899hoffenheim","hoffenheim":"1899hoffenheim",
+    "rcdespanyoldebarcelona":"espanyol","realbetisbalompie":"betis",
+    "asroma":"roma","sscnapoli":"napoli",
+    "leicestercity":"leicester","leedsunited":"leeds",
+    "brightonhovealbion":"brighton",
 }
 
 def canonical_team(name):
     value=unicodedata.normalize("NFKD", str(name or ""))
     value="".join(c for c in value if not unicodedata.combining(c))
-    value=re.sub(r"[^a-z0-9]","",value.lower())
+    value=re.sub(r"\b(fc|cf|afc)\b","",value.lower())
+    value=re.sub(r"[^a-z0-9]","",value)
     return ALIASES.get(value,value)
 
 def historical_team(name, rows):
@@ -706,6 +715,30 @@ def fixture_report(code, fixture_id):
     if len(rows)<40:raise ValueError("Insufficient historical results for this league.")
     home=historical_team(fixture["home"],rows)
     away=historical_team(fixture["away"],rows)
+    # Incorporate completed current-season matches when the official
+    # provider is configured. No post-kickoff data is used.
+    current_count=0
+    current_error=""
+    if os.environ.get("FOOTBALL_DATA_ORG_KEY","").strip():
+        try:
+            from football_api import official_recent_results
+            current=official_recent_results(code)
+            teams={n for r in rows for n in (r["home"],r["away"])}
+            by_name={}
+            for name in teams:by_name.setdefault(canonical_team(name),[]).append(name)
+            existing={(r["date"],r["home"],r["away"]) for r in rows}
+            for r in current:
+                hm=by_name.get(canonical_team(r["home"]),[])
+                am=by_name.get(canonical_team(r["away"]),[])
+                if len(hm)!=1 or len(am)!=1:continue
+                h,a=hm[0],am[0]
+                key=(r["date"],h,a)
+                if key in existing:continue
+                rows.append({**r,"home":h,"away":a,"league":code})
+                existing.add(key);current_count+=1
+            rows.sort(key=lambda r:r["date"])
+        except Exception as exc:
+            current_error=str(exc)[:120]
     previous=[r for r in rows if r["date"] < fixture["date"][:10]]
     model=make_model(previous,home,away)
     m=model["markets"];latest=model["latest_data"]
@@ -726,7 +759,10 @@ def fixture_report(code, fixture_id):
                 "hg":r["hg"],"ag":r["ag"]} for r in h2h],
         "unavailable":["Corners","Throw-ins","Yellow and red cards","Shots and possession",
                        "Injuries and suspensions","Confirmed lineups","xG","Current bookmaker odds"],
-        "warning":"The latest imported historical record is "+latest+" ("+str(age)+" days old). This is NOT a current-form or validated 2026 prediction."}
+        "warning":("Latest available match record: "+latest+" ("+str(age)+" days old). "
+                   +str(current_count)+" additional current-season results included. "
+                   +("Official results unavailable: "+current_error+". " if current_error else "")
+                   +"Historical model estimates are not guaranteed or validated for betting.")}
 
 
 class Handler(BaseHTTPRequestHandler):

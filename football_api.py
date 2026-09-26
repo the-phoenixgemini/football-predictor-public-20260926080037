@@ -287,6 +287,78 @@ def public_scoreboard(code):
                              "home":home["displayName"],"away":away["displayName"]})
     return sorted(fixtures,key=lambda x:x["date"])
 
+
+# Official football-data.org integration. Configure FOOTBALL_DATA_ORG_KEY
+# in the server environment (Render), never in the public Git repository.
+FD_CODES={"E0":"PL","SP1":"PD","D1":"BL1","I1":"SA","F1":"FL1"}
+
+def football_data_request(code, params):
+    key=os.environ.get("FOOTBALL_DATA_ORG_KEY","").strip()
+    if not key:raise ValueError("FOOTBALL_DATA_ORG_KEY is not configured.")
+    url="https://api.football-data.org/v4/competitions/"+FD_CODES[code]+"/matches"
+    url+="?"+urllib.parse.urlencode(params)
+    request=urllib.request.Request(url,headers={
+        "X-Auth-Token":key,"Accept":"application/json",
+        "User-Agent":"FootballPredictor/0.9"})
+    try:
+        with urllib.request.urlopen(request,timeout=24) as response:
+            return json.load(response).get("matches",[])
+    except urllib.error.HTTPError as exc:
+        raise ValueError("football-data.org HTTP "+str(exc.code)+
+                         " (check token and competition permissions)") from exc
+    except urllib.error.URLError as exc:
+        raise ValueError("football-data.org connection failed: "+str(exc.reason)) from exc
+
+def official_scheduled_fixtures(code):
+    now=datetime.now(timezone.utc)
+    items=football_data_request(code,{
+        "dateFrom":now.date().isoformat(),
+        "dateTo":(now.date()+timedelta(days=30)).isoformat()
+    })
+    out=[]
+    for item in items:
+        if item.get("status") not in ("SCHEDULED","TIMED"):
+            continue
+        date=item.get("utcDate","")
+        try: valid=datetime.fromisoformat(date.replace("Z","+00:00"))>now
+        except (ValueError,TypeError):valid=False
+        home=item.get("homeTeam") or {}
+        away=item.get("awayTeam") or {}
+        if not valid or not home.get("name") or not away.get("name"):continue
+        out.append({"id":"fd:"+str(item["id"]),"date":date,
+                    "home":home["name"],"away":away["name"],
+                    "status":item["status"]})
+    return sorted(out,key=lambda f:f["date"])
+
+def official_recent_results(code):
+    """Finished games from the current European season (when token is set)."""
+    if not os.environ.get("FOOTBALL_DATA_ORG_KEY","").strip():return []
+    now=datetime.now(timezone.utc)
+    season=current_season(now)
+    cache=CACHE/("fd_results_"+code+"_"+str(season)+".json")
+    if cache.exists() and time.time()-cache.stat().st_mtime<3600:
+        try:return json.loads(cache.read_text(encoding="utf-8"))
+        except (ValueError,OSError):pass
+    rows=football_data_request(code,{
+        "dateFrom":str(season)+"-07-01",
+        "dateTo":now.date().isoformat(),
+        "status":"FINISHED"
+    })
+    result=[]
+    for item in rows:
+        h=item.get("homeTeam") or {};a=item.get("awayTeam") or {}
+        score=item.get("score") or {}
+        ft=score.get("fullTime") or {};ht=score.get("halfTime") or {}
+        if not item.get("utcDate") or not h.get("name") or not a.get("name"):continue
+        hg,ag=ft.get("home"),ft.get("away")
+        if type(hg)!=int or type(ag)!=int or hg<0 or ag<0:continue
+        result.append({"date":item["utcDate"][:10],"home":h["name"],
+                       "away":a["name"],"hg":hg,"ag":ag,
+                       "hthg":ht.get("home"),"htag":ht.get("away")})
+    cache.write_text(json.dumps(result),encoding="utf-8")
+    return result
+
+
 def get_scheduled_fixtures(code):
     if code not in LEAGUES:raise ValueError("Unsupported competition.")
     cache=CACHE/("schedule_"+code+".json")
@@ -297,6 +369,17 @@ def get_scheduled_fixtures(code):
             return result
         except (OSError,ValueError):pass
     errors=[]
+    if os.environ.get("FOOTBALL_DATA_ORG_KEY","").strip():
+        try:
+            items=official_scheduled_fixtures(code)
+            result={"league":LEAGUES[code]["name"],"fixtures":items,
+                    "source":"football-data.org (official free fixtures)",
+                    "errors":[],"cached":False}
+            # An empty list can be genuine (international break).
+            cache.write_text(json.dumps(result),encoding="utf-8")
+            return result
+        except Exception as exc:
+            errors.append("football-data.org: "+str(exc)[:160])
     try:
         result=get_fixtures(code)
         items=result["fixtures"]
