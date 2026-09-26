@@ -1,4 +1,4 @@
-﻿import os
+import os
 
 from football_api import get_fixtures
 import csv
@@ -241,7 +241,8 @@ def status():
             })
 
     return {
-        "version": "0.2",
+        "version": "0.3-data",
+        "public_preview": bool(os.environ.get("PUBLIC_PREVIEW")),
         "matches": total,
         "leagues": output,
     }
@@ -824,6 +825,8 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     initialize()
+    imported = import_data()
+    print('Historical snapshot:', imported, flush=True)
 
     url = f"http://127.0.0.1:{PORT}"
 
@@ -833,7 +836,7 @@ def main():
     )
 
     print()
-    print("FOOTBALL PREDICTOR v0.2")
+    print("FOOTBALL PREDICTOR v0.3-data")
     print("Application:", url)
     print("Database:", DB)
     print("Import folder:", IMPORT)

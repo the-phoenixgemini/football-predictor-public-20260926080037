@@ -838,7 +838,7 @@ async function load() {
     try {
         const data = await request("/api/status");
 
-        leagues = data.leagues;
+        leagues = data.leagues || [];
 
         $("dataStatus").textContent =
             data.matches +
@@ -847,7 +847,7 @@ async function load() {
             " leagues.";
 
         $("importPath").textContent =
-            "Desktop\\FootballPredictor_v0_2\\data\\import";
+            "Historical data is loaded automatically.";
 
         populate(
             $("league"),
