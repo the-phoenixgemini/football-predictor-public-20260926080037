@@ -1,0 +1,10 @@
+﻿api_key.txt
+.env
+.env.*
+data/
+backups/
+__pycache__/
+*.pyc
+.venv/
+.vscode/
+*.zip
