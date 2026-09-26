@@ -1,5 +1,5 @@
 
-const CACHE = "football-pwa-v03-data";
+const CACHE = "football-pwa-v08-fixtures";
 
 const SHELL = [
     "/",

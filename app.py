@@ -1,6 +1,6 @@
 import os
 
-from football_api import get_fixtures
+from football_api import get_scheduled_fixtures, LEAGUES
 import csv
 import json
 import math
@@ -241,7 +241,7 @@ def status():
             })
 
     return {
-        "version": "0.3-data",
+        "version": "0.8",
         "public_preview": bool(os.environ.get("PUBLIC_PREVIEW")),
         "matches": total,
         "leagues": output,
@@ -639,6 +639,96 @@ def backtest(league):
     }
 
 
+
+# Fixture-only reporting; every outcome is calculated from genuine imported scores.
+import re
+import unicodedata
+from datetime import datetime, timezone
+from football_api import LEAGUES, get_scheduled_fixtures
+
+ALIASES = {
+    "manchesterunited":"manunited","manchestercity":"mancity",
+    "tottenhamhotspur":"tottenham","newcastleunited":"newcastle",
+    "westhamunited":"westham","wolverhamptonwanderers":"wolves",
+    "brightonandhovealbion":"brighton","nottinghamforest":"nottmforest",
+    "bayer04leverkusen":"leverkusen","bayerleverkusen":"leverkusen",
+    "fcbarcelona":"barcelona","atleticomadrid":"athmadrid",
+    "athleticclub":"athbilbao","internazionale":"inter",
+    "intermilan":"inter","acmilan":"milan",
+    "parissaintgermain":"psg","parissaintgermainfc":"psg",
+    "olympiquemarseille":"marseille","olympiquelyon":"lyon",
+}
+
+def canonical_team(name):
+    value=unicodedata.normalize("NFKD", str(name or ""))
+    value="".join(c for c in value if not unicodedata.combining(c))
+    value=re.sub(r"[^a-z0-9]","",value.lower())
+    return ALIASES.get(value,value)
+
+def historical_team(name, rows):
+    teams={n for r in rows for n in (r["home"],r["away"])}
+    matches=[n for n in teams if n==name]
+    if not matches:
+        matches=[n for n in teams if canonical_team(n)==canonical_team(name)]
+    if len(matches)!=1:
+        raise ValueError("No reliable historical match for "+str(name)+". This fixture cannot be analysed with the current dataset.")
+    return matches[0]
+
+def recent_form(rows, name, count):
+    games=[r for r in rows if name in (r["home"],r["away"])][-count:]
+    out={"played":len(games),"wins":0,"draws":0,"losses":0,"scored":0,"conceded":0}
+    for g in games:
+        gf,ga=(g["hg"],g["ag"]) if g["home"]==name else (g["ag"],g["hg"])
+        out["scored"]+=gf;out["conceded"]+=ga
+        out["wins" if gf>ga else "draws" if gf==ga else "losses"]+=1
+    return out
+
+def half_time_markets(rows, home, away):
+    home_rows=[r for r in rows if r["home"]==home and r["hthg"] is not None and r["htag"] is not None][-20:]
+    away_rows=[r for r in rows if r["away"]==away and r["hthg"] is not None and r["htag"] is not None][-20:]
+    if len(home_rows)<5 or len(away_rows)<5:
+        return None
+    rate_h=max(0.05,(sum(r["hthg"] for r in home_rows)/len(home_rows)+sum(r["hthg"] for r in away_rows)/len(away_rows))/2)
+    rate_a=max(0.05,(sum(r["htag"] for r in away_rows)/len(away_rows)+sum(r["htag"] for r in home_rows)/len(home_rows))/2)
+    matrix=[(h,a,poisson(h,rate_h)*poisson(a,rate_a)) for h in range(12) for a in range(12)]
+    total=sum(p for _,_,p in matrix)
+    if not total:return None
+    return {"home":sum(p for h,a,p in matrix if h>a)/total,
+            "draw":sum(p for h,a,p in matrix if h==a)/total,
+            "away":sum(p for h,a,p in matrix if h<a)/total}
+
+def fixture_report(code, fixture_id):
+    if code not in LEAGUES:raise ValueError("Unsupported competition.")
+    listing=get_scheduled_fixtures(code)
+    fixture=next((f for f in listing["fixtures"] if str(f["id"])==str(fixture_id)),None)
+    if fixture is None:raise ValueError("This fixture is not in the current scheduled-match list. Refresh and select an upcoming match.")
+    rows=fetch_matches(code)
+    if len(rows)<40:raise ValueError("Insufficient historical results for this league.")
+    home=historical_team(fixture["home"],rows)
+    away=historical_team(fixture["away"],rows)
+    previous=[r for r in rows if r["date"] < fixture["date"][:10]]
+    model=make_model(previous,home,away)
+    m=model["markets"];latest=model["latest_data"]
+    age=(datetime.now(timezone.utc).date()-datetime.strptime(latest,"%Y-%m-%d").date()).days
+    goals={str(n):{"over":m["over_"+str(n).replace(".","_")],
+                   "under":m["under_"+str(n).replace(".","_")]} for n in (0.5,1.5,2.5,3.5,4.5)}
+    h2h=[r for r in previous if {r["home"],r["away"]}=={home,away}][-10:]
+    return {"fixture":fixture,"league":LEAGUES[code]["name"],"source":listing["source"],
+        "model":{"name":"Smoothed independent Poisson","historical_matches":model["historical_matches"],
+                 "latest":latest,"age_days":age,"home_goals":model["expected_home_goals"],
+                 "away_goals":model["expected_away_goals"]},
+        "full_time":{k:m[k] for k in ("home","draw","away")},
+        "half_time":half_time_markets(previous,home,away),"goals":goals,
+        "btts":{"yes":m["btts_yes"],"no":m["btts_no"]},
+        "form":{side:{str(n):recent_form(previous,name,n) for n in (5,10,20)}
+                for side,name in (("home",home),("away",away))},
+        "h2h":[{"date":r["date"],"home":r["home"],"away":r["away"],
+                "hg":r["hg"],"ag":r["ag"]} for r in h2h],
+        "unavailable":["Corners","Throw-ins","Yellow and red cards","Shots and possession",
+                       "Injuries and suspensions","Confirmed lineups","xG","Current bookmaker odds"],
+        "warning":"The latest imported historical record is "+latest+" ("+str(age)+" days old). This is NOT a current-form or validated 2026 prediction."}
+
+
 class Handler(BaseHTTPRequestHandler):
 
     def send_json(self, obj, code=200):
@@ -726,8 +816,15 @@ class Handler(BaseHTTPRequestHandler):
                 )[0]
 
                 return self.send_json(
-                    get_fixtures(league)
+                    get_scheduled_fixtures(league)
                 )
+
+            if route == "/api/report":
+                from urllib.parse import parse_qs
+                params=parse_qs(urlparse(self.path).query)
+                league=params.get("league",[""])[0]
+                fixture_id=params.get("id",[""])[0]
+                return self.send_json(fixture_report(league,fixture_id))
 
             if route == "/api/status":
                 return self.send_json(status())

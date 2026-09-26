@@ -257,3 +257,63 @@ def get_fixtures(league_code):
 
     return result
 
+
+
+# The free API-Football plan may reject the current season. If it does,
+# use an explicitly labelled, unofficial public schedule; never invent fixtures.
+SCOREBOARD_LEAGUES={"E0":"eng.1","SP1":"esp.1","D1":"ger.1","I1":"ita.1","F1":"fra.1"}
+
+def public_scoreboard(code):
+    today=datetime.now(timezone.utc).date()
+    window=today.strftime("%Y%m%d")+"-"+(today+timedelta(days=14)).strftime("%Y%m%d")
+    url="https://site.api.espn.com/apis/site/v2/sports/soccer/"+SCOREBOARD_LEAGUES[code]+"/scoreboard?"+urllib.parse.urlencode({"dates":window,"limit":"250"})
+    request=urllib.request.Request(url,headers={"User-Agent":"FootballPredictor/0.8","Accept":"application/json"})
+    with urllib.request.urlopen(request,timeout=18) as response:
+        payload=json.load(response)
+    fixtures=[]
+    for event in payload.get("events",[]):
+        competition=(event.get("competitions") or [{}])[0]
+        sides={x.get("homeAway"):x.get("team",{}) for x in competition.get("competitors",[])}
+        home,away=sides.get("home",{}),sides.get("away",{})
+        date=event.get("date")
+        if ((event.get("status") or {}).get("type") or {}).get("state")!="pre" or not date:
+            continue
+        if not home.get("displayName") or not away.get("displayName"):
+            continue
+        try: future=datetime.fromisoformat(date.replace("Z","+00:00"))>datetime.now(timezone.utc)
+        except (TypeError,ValueError):future=False
+        if future:
+            fixtures.append({"id":"espn:"+str(event["id"]),"date":date,
+                             "home":home["displayName"],"away":away["displayName"]})
+    return sorted(fixtures,key=lambda x:x["date"])
+
+def get_scheduled_fixtures(code):
+    if code not in LEAGUES:raise ValueError("Unsupported competition.")
+    cache=CACHE/("schedule_"+code+".json")
+    if cache.exists() and time.time()-cache.stat().st_mtime<1200:
+        try:
+            result=json.loads(cache.read_text(encoding="utf-8"))
+            result["cached"]=True
+            return result
+        except (OSError,ValueError):pass
+    errors=[]
+    try:
+        result=get_fixtures(code)
+        items=result["fixtures"]
+        if items:
+            result["source"]="API-Football"
+            result["errors"]=[]
+            cache.write_text(json.dumps(result),encoding="utf-8")
+            return result
+    except Exception as exc:
+        errors.append("API-Football: "+str(exc)[:140])
+    try:
+        items=public_scoreboard(code)
+        source="ESPN public scoreboard (unofficial)"
+    except Exception as exc:
+        errors.append("Alternate scoreboard: "+str(exc)[:140])
+        items=[];source="Unavailable"
+    result={"league":LEAGUES[code]["name"],"fixtures":items,
+            "source":source,"errors":errors,"cached":False}
+    if items:cache.write_text(json.dumps(result),encoding="utf-8")
+    return result
